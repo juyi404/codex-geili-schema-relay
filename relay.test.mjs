@@ -108,6 +108,9 @@ test('retries upstream provider-dialect misroutes; forwards other errors untouch
     if (mode === 'misroute-twice' && hits < 3) {
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'Invalid JSON payload received. Unknown name "anthropic_version": Cannot find field.' } }));
+    } else if (mode === 'exhausted-once' && hits === 5) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end('{"error":{"message":"All available accounts exhausted"}}');
     } else if (mode === 'balance') {
       res.writeHead(403, { 'content-type': 'application/json' });
       res.end('{"error":{"code":"INSUFFICIENT_BALANCE"}}');
@@ -131,6 +134,11 @@ test('retries upstream provider-dialect misroutes; forwards other errors untouch
     assert.equal(denied.status, 403);
     assert.match(await denied.text(), /INSUFFICIENT_BALANCE/);
     assert.equal(hits, 4);
+    mode = 'exhausted-once';
+    const recoveredPool = await post();
+    assert.equal(recoveredPool.status, 200);
+    assert.equal(await recoveredPool.text(), '{"ok":true}');
+    assert.equal(hits, 6);
   } finally {
     await relay.close(); upstream.closeAllConnections();
     await new Promise(resolve => upstream.close(resolve));

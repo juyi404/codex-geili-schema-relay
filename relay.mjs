@@ -265,8 +265,10 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       });
       // The upstream's model pools occasionally route a request through a channel
       // speaking the wrong provider dialect (an Anthropic-format payload sent to a
-      // Gemini backend). The pick is per-request, so re-sending re-rolls the channel.
+      // Gemini backend), or briefly run out of pooled upstream accounts. Both are
+      // per-attempt transients, so re-sending re-rolls them.
       const MISROUTE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"/;
+      const EXHAUSTED = /All available accounts exhausted/i;
       let response;
       let errorBody;
       for (let attempt = 0; ; attempt++) {
@@ -290,9 +292,11 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         let text;
         try { text = response.headers['content-encoding'] === 'gzip' ? gunzipSync(errorBody).toString('utf8') : errorBody.toString('utf8'); }
         catch { text = errorBody.toString('utf8'); }
-        if (!MISROUTE.test(text)) break;
-        log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1 });
-        await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
+        const misroute = MISROUTE.test(text);
+        if (!misroute && !EXHAUSTED.test(text)) break;
+        log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1,
+          reason: misroute ? 'dialect_misroute' : 'accounts_exhausted' });
+        await new Promise(resolve => setTimeout(resolve, (misroute ? 300 : 1500) * (attempt + 1)));
       }
       if (response.statusCode >= 300 && response.statusCode < 400) {
         response.resume(); res.writeHead(502).end('Upstream redirects are disabled'); return;
