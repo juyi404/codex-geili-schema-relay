@@ -1,0 +1,7 @@
+*.log
+*.bak
+*.toml
+verification-*/
+node_modules/
+README.txt
+filter-catalog.mjs
