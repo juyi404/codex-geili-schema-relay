@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, createRelay, SERVICE } from './relay.mjs';
+import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, createRelay, SERVICE } from './relay.mjs';
 
 const parameters = () => ({ type: 'object', properties: {
   enabled: { type: 'boolean', enum: [true] },
@@ -208,6 +208,19 @@ test('retries transient connection failures before any response bytes', async ()
     await relay.close(); upstream.closeAllConnections();
     await new Promise(resolve => upstream.close(resolve));
   }
+});
+
+test('pins max_output_tokens for gemini requests that lack one', () => {
+  const bare = { model: 'gemini-4-argon' };
+  assert.equal(injectGeminiMaxOutput(bare), 1);
+  assert.equal(bare.max_output_tokens, 65536);
+  assert.equal(injectGeminiMaxOutput(bare), 0);
+  const explicit = { model: 'gemini-4-argon', max_output_tokens: 64 };
+  assert.equal(injectGeminiMaxOutput(explicit), 0);
+  assert.equal(explicit.max_output_tokens, 64);
+  const gpt = { model: 'gpt-6.1-sol' };
+  assert.equal(injectGeminiMaxOutput(gpt), 0);
+  assert.equal(gpt.max_output_tokens, undefined);
 });
 
 test('normalizes namespace tools and provider declaration formats', () => {

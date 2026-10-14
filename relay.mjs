@@ -197,6 +197,16 @@ export function injectGeminiOutputGuidance(payload) {
   return 1;
 }
 
+// Codex never sends max_output_tokens; some gateways then apply a small default
+// of their own and long responses come back truncated (incomplete:
+// max_output_tokens). Pin the field to Gemini's real per-response maximum.
+export function injectGeminiMaxOutput(payload) {
+  if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
+  if (payload.max_output_tokens != null) return 0;
+  payload.max_output_tokens = 65536;
+  return 1;
+}
+
 function headersWithoutHop(headers) {
   const result = { ...headers };
   for (const name of [...HOP, ...String(headers.connection ?? '').split(',').map(name => name.trim().toLowerCase())]) delete result[name];
@@ -239,11 +249,13 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         const count = normalizeGeminiTools(payload);
         const appended = normalizeGeminiTurns(payload);
         const guided = injectGeminiOutputGuidance(payload);
-        if (count || appended || guided) {
+        const capped = injectGeminiMaxOutput(payload);
+        if (count || appended || guided || capped) {
           body = Buffer.from(JSON.stringify(payload));
           normalizedRequests++;
           normalizedConstraints += count;
           log({ event: 'gemini_schema_normalized', count, max_output_tokens: payload.max_output_tokens ?? null,
+            ...(capped ? { max_output_tokens_injected: true } : {}),
             ...(appended ? { appended_continue_turn: true } : {}), ...(guided ? { output_guidance: true } : {}) });
         }
       }
