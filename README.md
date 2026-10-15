@@ -42,11 +42,19 @@ Codex 发出的是 OpenAI Responses 格式的请求，转售网关将其翻译�
    powershell -ExecutionPolicy Bypass -File start.ps1
    ```
 
-4. 开机自启（可选，写入当前用户的 Run 键）：
+4. 开机自启 + 自愈（可选，推荐）。注册计划任务：登录时启动，并每 2 分钟检查一次
+   （启动脚本幂等，已在运行则直接退出；经 `start-hidden.vbs` 启动，完全无窗口闪烁）：
 
    ```powershell
-   reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v CodexGeiliSchemaRelay /t REG_SZ /d "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"%USERPROFILE%\.codex\compat\geili-schema-relay\start.ps1\"" /f
+   $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "//B //Nologo ""$env:USERPROFILE\.codex\compat\geili-schema-relay\start-hidden.vbs"""
+   $t1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+   $t2 = New-ScheduledTaskTrigger -Once -At '00:00' -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration (New-TimeSpan -Days 3650)
+   $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
+   Register-ScheduledTask -TaskName 'CodexGeiliSchemaRelay' -Action $action -Trigger $t1,$t2 -Settings $settings -Force
    ```
+
+   不要用 HKCU Run 键：它只在登录瞬间尝试一次，失败没有补救，进程日间退出也无人拉起
+   （实测踩过：重启后 Run 键未生效，Codex 全线"重新连接"）。
 
 5. 重启 Codex Desktop 使 provider 配置生效。
 
@@ -85,8 +93,8 @@ curl http://127.0.0.1:18766/health
 
 ## 卸载
 
-把 `config.toml` 里的 `base_url` 改回上游地址，删除 Run 键
-（`reg delete "HKCU\...\Run" /v CodexGeiliSchemaRelay /f`），
+把 `config.toml` 里的 `base_url` 改回上游地址，删除计划任务
+（`Unregister-ScheduledTask CodexGeiliSchemaRelay -Confirm:$false`），
 停掉 18766 端口上的进程即可。
 
 ## 设计原则
