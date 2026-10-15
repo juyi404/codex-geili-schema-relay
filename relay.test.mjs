@@ -223,6 +223,48 @@ test('pins max_output_tokens for gemini requests that lack one', () => {
   assert.equal(gpt.max_output_tokens, undefined);
 });
 
+test('retries SSE streams that error before any output; forwards fatal ones', async () => {
+  let hits = 0;
+  let mode = 'misroute-then-ok';
+  const upstream = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    hits++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (mode === 'misroute-then-ok' && hits === 1) {
+      res.write('event: error\n');
+      res.end('data: {"type":"error","error":{"message":"Invalid JSON payload received. Unknown name \\"anthropic_version\\": Cannot find field."}}\n\n');
+    } else if (mode === 'fatal') {
+      res.write('event: error\n');
+      res.end('data: {"type":"error","error":{"message":"quota exceeded for this key"}}\n\n');
+    } else {
+      res.write('data: {"type":"response.output_text.delta","delta":"OK"}\n\n');
+      res.end('data: {"type":"response.completed"}\n\n');
+    }
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const relay = createRelay({ upstream: `http://127.0.0.1:${upstream.address().port}/v1` });
+  await new Promise(resolve => relay.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${relay.server.address().port}`;
+  const post = () => fetch(`${base}/v1/responses`, { method: 'POST',
+    headers: { authorization: 'Bearer test-key' }, body: '{"model":"gpt-6-astra","stream":true}' });
+  try {
+    const recovered = await post();
+    const text = await recovered.text();
+    assert.equal(recovered.status, 200);
+    assert.match(text, /response\.completed/);
+    assert.doesNotMatch(text, /anthropic_version/);
+    assert.equal(hits, 2);
+    mode = 'fatal';
+    const fatal = await post();
+    assert.equal(fatal.status, 200);
+    assert.match(await fatal.text(), /quota exceeded/);
+    assert.equal(hits, 3);
+  } finally {
+    await relay.close(); upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test('normalizes namespace tools and provider declaration formats', () => {
   for (const tool of [
     { type: 'namespace', tools: [{ type: 'function', parameters: parameters() }] },

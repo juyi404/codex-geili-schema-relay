@@ -213,6 +213,37 @@ function headersWithoutHop(headers) {
   return result;
 }
 
+const STREAM_RETRYABLE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"|All available accounts exhausted|server_is_overloaded|service_unavailable/i;
+const STREAM_CONTENT = /"type"\s*:\s*"response\.(?:output_item|content_part|output_text|reasoning|function_call|completed|incomplete)/;
+// Gateways often return 200, open the SSE stream, and only then emit an error
+// event for a failed upstream call. Nothing has reached the client yet at that
+// point, so hold the stream back until the first real output event and retry
+// transient early errors exactly like their 4xx counterparts.
+function guardStream(response) {
+  return new Promise(resolve => {
+    const chunks = [];
+    let size = 0;
+    const finish = verdict => {
+      response.pause();
+      response.removeListener('data', onData);
+      response.removeListener('end', onEnd);
+      response.removeListener('error', onEnd);
+      resolve({ verdict, preamble: Buffer.concat(chunks) });
+    };
+    const onEnd = () => finish('ended');
+    const onData = chunk => {
+      chunks.push(Buffer.from(chunk));
+      size += chunk.length;
+      const text = Buffer.concat(chunks).toString('utf8');
+      if (STREAM_CONTENT.test(text) || size > 262144) finish('pipe');
+      else if (STREAM_RETRYABLE.test(text)) finish('retry');
+    };
+    response.on('data', onData);
+    response.once('end', onEnd);
+    response.once('error', onEnd);
+  });
+}
+
 export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'test' } = {}) {
   const target = new URL(upstream);
   const controllers = new Set();
@@ -283,6 +314,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       const EXHAUSTED = /All available accounts exhausted/i;
       let response;
       let errorBody;
+      let guarded;
       for (let attempt = 0; ; attempt++) {
         // Nothing has been sent to the client before headers arrive, so transient
         // connection failures (reset, refused, DNS blip) are safe to retry here
@@ -296,7 +328,18 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
           continue;
         }
         errorBody = undefined;
-        if ((response.statusCode ?? 0) < 400) break;
+        guarded = undefined;
+        const status = response.statusCode ?? 0;
+        if (status < 300) {
+          if (!/text\/event-stream/.test(String(response.headers['content-type'] ?? ''))) break;
+          guarded = await guardStream(response);
+          if (guarded.verdict !== 'retry' || attempt >= 2) break;
+          response.destroy();
+          log({ event: 'upstream_misroute_retry', status, attempt: attempt + 1, reason: 'sse_early_error' });
+          await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1)));
+          continue;
+        }
+        if (status < 400) break;
         const errorChunks = [];
         for await (const chunk of response) errorChunks.push(Buffer.from(chunk));
         errorBody = Buffer.concat(errorChunks);
@@ -316,6 +359,17 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       if (errorBody !== undefined) {
         res.writeHead(response.statusCode ?? 502, headersWithoutHop(response.headers));
         res.end(errorBody);
+        return;
+      }
+      if (guarded !== undefined) {
+        res.writeHead(response.statusCode ?? 502, headersWithoutHop(response.headers));
+        res.write(guarded.preamble);
+        if (guarded.verdict === 'ended' || response.readableEnded || response.destroyed) { res.end(); return; }
+        await new Promise((resolve, reject) => {
+          response.once('error', reject);
+          response.once('end', resolve);
+          response.pipe(res);
+        });
         return;
       }
       await new Promise((resolve, reject) => {
