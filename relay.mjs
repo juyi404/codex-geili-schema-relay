@@ -70,7 +70,11 @@ function normalizeSchema(schema, root = schema, chain = new Set()) {
     for (const member of kept) changed += normalizeSchema(member, root, chain);
     const [first, ...rest] = kept;
     if (first) for (const [key, value] of Object.entries(first)) {
-      if (key !== 'anyOf' && !(key in schema)) schema[key] = value;
+      // A branch's required list must not become unconditional, and its
+      // properties must merge rather than be dropped when the parent has own ones.
+      if (key === 'anyOf' || key === 'required') continue;
+      if (key === 'properties' && object(value)) schema.properties = { ...value, ...(object(schema.properties) ? schema.properties : {}) };
+      else if (!(key in schema)) schema[key] = value;
     }
     if (rest.length) {
       const alternatives = `Alternative accepted forms: ${clip(rest.map(member => JSON.stringify(member)).join(' | '), 400)}.`;
@@ -122,6 +126,15 @@ function normalizeSchema(schema, root = schema, chain = new Set()) {
       : 'items' in schema ? 'array'
       : 'string';
     changed++;
+  }
+  // Gemini rejects schemas whose required list names properties that are not
+  // declared ("requires unspecified property") — prune to the declared set.
+  if (Array.isArray(schema.required)) {
+    const known = object(schema.properties) ? schema.required.filter(name => name in schema.properties) : [];
+    if (known.length !== schema.required.length) {
+      if (known.length) schema.required = known; else delete schema.required;
+      changed++;
+    }
   }
   if (object(schema.properties)) for (const child of Object.values(schema.properties)) changed += normalizeSchema(child, root, chain);
   for (const key of ['items', 'additionalProperties']) {

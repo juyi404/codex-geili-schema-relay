@@ -265,6 +265,24 @@ test('retries SSE streams that error before any output; forwards fatal ones', as
   }
 });
 
+test('merges anyOf branch properties and prunes required to declared properties', () => {
+  const schema = { type: 'object', properties: { keep: { type: 'string' } }, anyOf: [
+    { type: 'object', properties: { mode: { type: 'string' } }, required: ['mode', 'ghost'] },
+    { type: 'null' },
+  ] };
+  const payload = { model: 'gemini-4-argon', tools: [{ type: 'function', name: 'probe', parameters: schema }] };
+  assert.ok(normalizeGeminiTools(payload) > 0);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['keep', 'mode']);
+  assert.equal(schema.required, undefined);
+  assert.equal(schema.nullable, true);
+  const pruned = { type: 'object', properties: { a: { type: 'string' } }, required: ['a', 'mode'] };
+  assert.ok(normalizeGeminiTools({ model: 'gemini-4-argon', tools: [{ type: 'function', name: 'p2', parameters: pruned }] }) > 0);
+  assert.deepEqual(pruned.required, ['a']);
+  const orphan = { type: 'object', required: ['mode'] };
+  normalizeGeminiTools({ model: 'gemini-4-argon', tools: [{ type: 'function', name: 'p3', parameters: orphan }] });
+  assert.equal(orphan.required, undefined);
+});
+
 test('normalizes namespace tools and provider declaration formats', () => {
   for (const tool of [
     { type: 'namespace', tools: [{ type: 'function', parameters: parameters() }] },
