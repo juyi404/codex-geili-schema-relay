@@ -346,7 +346,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         if (status < 300) {
           if (!/text\/event-stream/.test(String(response.headers['content-type'] ?? ''))) break;
           guarded = await guardStream(response);
-          if (guarded.verdict !== 'retry' || attempt >= 2) break;
+          if (guarded.verdict !== 'retry' || attempt >= 4) break;
           response.destroy();
           log({ event: 'upstream_misroute_retry', status, attempt: attempt + 1, reason: 'sse_early_error' });
           await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1)));
@@ -356,7 +356,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         const errorChunks = [];
         for await (const chunk of response) errorChunks.push(Buffer.from(chunk));
         errorBody = Buffer.concat(errorChunks);
-        if (attempt >= 2) break;
+        if (attempt >= 4) break;
         let text;
         try { text = response.headers['content-encoding'] === 'gzip' ? gunzipSync(errorBody).toString('utf8') : errorBody.toString('utf8'); }
         catch { text = errorBody.toString('utf8'); }
