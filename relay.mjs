@@ -174,6 +174,12 @@ export function normalizeGeminiTools(payload) {
 // is accepted and the model picks up where it left off.
 export function normalizeGeminiTurns(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
+  if (Array.isArray(payload.messages) && payload.messages.length) {
+    const last = payload.messages.at(-1);
+    if (!object(last) || (last.role !== 'assistant' && last.role !== 'model') || last.tool_calls) return 0;
+    payload.messages.push({ role: 'user', content: 'Continue from exactly where you left off.' });
+    return 1;
+  }
   if (!Array.isArray(payload.input) || !payload.input.length) return 0;
   const last = payload.input.at(-1);
   if (!object(last)) return 0;
@@ -196,6 +202,16 @@ export function injectGeminiOutputGuidance(payload) {
     payload.instructions += `\n\n${OUTPUT_GUIDANCE}`;
     return 1;
   }
+  if (Array.isArray(payload.messages)) {
+    let index = 0;
+    for (const item of payload.messages) {
+      if (!object(item) || (item.role !== 'system' && item.role !== 'developer')) break;
+      if (JSON.stringify(item.content ?? '').includes('<output_budget>')) return 0;
+      index++;
+    }
+    payload.messages.splice(index, 0, { role: 'system', content: OUTPUT_GUIDANCE });
+    return 1;
+  }
   if (!Array.isArray(payload.input)) return 0;
   let index = 0;
   for (const item of payload.input) {
@@ -215,6 +231,11 @@ export function injectGeminiOutputGuidance(payload) {
 // max_output_tokens). Pin the field to Gemini's real per-response maximum.
 export function injectGeminiMaxOutput(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
+  if (Array.isArray(payload.messages)) {
+    if (payload.max_tokens != null || payload.max_completion_tokens != null) return 0;
+    payload.max_tokens = 65536;
+    return 1;
+  }
   if (payload.max_output_tokens != null) return 0;
   payload.max_output_tokens = 65536;
   return 1;
@@ -227,7 +248,7 @@ function headersWithoutHop(headers) {
 }
 
 const STREAM_RETRYABLE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"|All available accounts exhausted|server_is_overloaded|service_unavailable/i;
-const STREAM_CONTENT = /"type"\s*:\s*"response\.(?:output_item|content_part|output_text|reasoning|function_call|completed|incomplete)/;
+const STREAM_CONTENT = /"type"\s*:\s*"response\.(?:output_item|content_part|output_text|reasoning|function_call|completed|incomplete)|"object"\s*:\s*"chat\.completion/;
 // Gateways often return 200, open the SSE stream, and only then emit an error
 // event for a failed upstream call. Nothing has reached the client yet at that
 // point, so hold the stream back until the first real output event and retry

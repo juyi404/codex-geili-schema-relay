@@ -283,6 +283,33 @@ test('merges anyOf branch properties and prunes required to declared properties'
   assert.equal(orphan.required, undefined);
 });
 
+test('adapts chat_completions-shaped gemini payloads (Hermes)', () => {
+  const payload = { model: 'gemini-4-argon', messages: [
+    { role: 'system', content: 'You are Hermes.' },
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: 'partial answer' },
+  ], tools: [{ type: 'function', function: { name: 'probe', parameters: { properties: { sectionId: { anyOf: [{ type: 'string' }, { type: 'null' }] } } } } }] };
+  assert.ok(normalizeGeminiTools(payload) > 0);
+  assert.equal(normalizeGeminiTurns(payload), 1);
+  assert.equal(injectGeminiOutputGuidance(payload), 1);
+  assert.equal(injectGeminiMaxOutput(payload), 1);
+  const params = payload.tools[0].function.parameters;
+  assert.equal(params.properties.sectionId.type, 'string');
+  assert.equal(params.properties.sectionId.nullable, true);
+  assert.equal(payload.messages.at(-1).role, 'user');
+  assert.match(payload.messages.at(-1).content, /Continue from exactly/);
+  assert.equal(payload.messages[1].role, 'system');
+  assert.match(payload.messages[1].content, /<output_budget>/);
+  assert.equal(payload.max_tokens, 65536);
+  assert.equal(injectGeminiOutputGuidance(payload), 0);
+  assert.equal(injectGeminiMaxOutput(payload), 0);
+  const toolCallTail = { model: 'gemini-4-argon', messages: [{ role: 'assistant', content: null, tool_calls: [{ id: 'c1' }] }] };
+  assert.equal(normalizeGeminiTurns(toolCallTail), 0);
+  const explicit = { model: 'gemini-4-argon', messages: [{ role: 'user', content: 'x' }], max_tokens: 100 };
+  assert.equal(injectGeminiMaxOutput(explicit), 0);
+  assert.equal(explicit.max_tokens, 100);
+});
+
 test('normalizes namespace tools and provider declaration formats', () => {
   for (const tool of [
     { type: 'namespace', tools: [{ type: 'function', parameters: parameters() }] },
