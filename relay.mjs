@@ -210,6 +210,32 @@ export function normalizeGeminiTurns(payload) {
 // ("OpenAI encrypted reasoning is unsupported for Gemini compatibility").
 // Codex resends prior turns' reasoning items (and asks for them via include)
 // whenever response storage is off; Gemini cannot use them anyway, so strip.
+// The gateway rejects freeform-tool history items for Gemini ("unsupported
+// Gemini input item type \"custom_tool_call\"") — Codex emits them for
+// freeform tools like apply_patch, and they land in gemini requests whenever
+// a thread switches models. Converting to function_call items trips the
+// gateway's turn folding when the name has no declaration, so render the
+// pair as plain messages instead: pairing-free and always translatable.
+export function convertGeminiCustomToolCalls(payload) {
+  if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
+  if (!Array.isArray(payload.input)) return 0;
+  let changed = 0;
+  for (let i = 0; i < payload.input.length; i++) {
+    const item = payload.input[i];
+    if (!object(item)) continue;
+    if (item.type === 'custom_tool_call') {
+      payload.input[i] = { type: 'message', role: 'assistant', content: [{ type: 'output_text',
+        text: `[tool call: ${item.name ?? 'tool'}]\n${String(item.input ?? '')}` }] };
+      changed++;
+    } else if (item.type === 'custom_tool_call_output') {
+      payload.input[i] = { type: 'message', role: 'user', content: [{ type: 'input_text',
+        text: `[tool result]\n${typeof item.output === 'string' ? item.output : JSON.stringify(item.output ?? '')}` }] };
+      changed++;
+    }
+  }
+  return changed;
+}
+
 export function stripGeminiEncryptedReasoning(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
   let changed = 0;
@@ -407,16 +433,18 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         geminiModel = object(payload) && /(?:^|\/)gemini[-/]/i.test(payload.model ?? '');
         const count = normalizeGeminiTools(payload);
         const stripped = stripGeminiEncryptedReasoning(payload);
+        const converted = convertGeminiCustomToolCalls(payload);
         const appended = normalizeGeminiTurns(payload);
         const guided = injectGeminiOutputGuidance(payload);
         const capped = injectGeminiMaxOutput(payload);
-        if (count || stripped || appended || guided || capped) {
+        if (count || stripped || converted || appended || guided || capped) {
           body = Buffer.from(JSON.stringify(payload));
           normalizedRequests++;
           normalizedConstraints += count;
           log({ event: 'gemini_schema_normalized', count, max_output_tokens: payload.max_output_tokens ?? payload.max_tokens ?? null,
             ...(capped ? { max_output_tokens_injected: true } : {}),
             ...(stripped ? { encrypted_reasoning_stripped: stripped } : {}),
+            ...(converted ? { custom_tool_calls_converted: converted } : {}),
             ...(appended ? { appended_continue_turn: true } : {}), ...(guided ? { output_guidance: true } : {}) });
         }
       }

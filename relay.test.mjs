@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, stripGeminiEncryptedReasoning, patchGeminiCompletedLine, createSsePatcher, createRelay, SERVICE } from './relay.mjs';
+import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, stripGeminiEncryptedReasoning, convertGeminiCustomToolCalls, patchGeminiCompletedLine, createSsePatcher, createRelay, SERVICE } from './relay.mjs';
 
 const parameters = () => ({ type: 'object', properties: {
   enabled: { type: 'boolean', enum: [true] },
@@ -385,6 +385,23 @@ test('patches gemini response.completed usage fields across chunk splits', async
     await relay.close(); upstream.closeAllConnections();
     await new Promise(resolve => upstream.close(resolve));
   }
+});
+
+test('converts custom tool call history to plain messages for gemini', () => {
+  const payload = { model: 'gemini-4-argon', input: [
+    { type: 'custom_tool_call', id: 'ct1', call_id: 'c1', name: 'apply_patch', input: '*** Begin Patch' },
+    { type: 'custom_tool_call_output', call_id: 'c1', output: 'ok' },
+  ] };
+  assert.equal(convertGeminiCustomToolCalls(payload), 2);
+  assert.equal(payload.input[0].type, 'message');
+  assert.equal(payload.input[0].role, 'assistant');
+  assert.match(payload.input[0].content[0].text, /apply_patch[\s\S]*Begin Patch/);
+  assert.equal(payload.input[1].role, 'user');
+  assert.match(payload.input[1].content[0].text, /tool result[\s\S]*ok/);
+  assert.equal(convertGeminiCustomToolCalls(payload), 0);
+  const gpt = { model: 'gpt-6.1-sol', input: [{ type: 'custom_tool_call', call_id: 'c1', name: 'x', input: 'y' }] };
+  assert.equal(convertGeminiCustomToolCalls(gpt), 0);
+  assert.equal(gpt.input[0].type, 'custom_tool_call');
 });
 
 test('normalizes namespace tools and provider declaration formats', () => {
