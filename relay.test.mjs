@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, stripGeminiEncryptedReasoning, createRelay, SERVICE } from './relay.mjs';
+import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, stripGeminiEncryptedReasoning, patchGeminiCompletedLine, createSsePatcher, createRelay, SERVICE } from './relay.mjs';
 
 const parameters = () => ({ type: 'object', properties: {
   enabled: { type: 'boolean', enum: [true] },
@@ -335,6 +335,53 @@ test('strips encrypted reasoning from gemini requests', () => {
   const chat = { model: 'gemini-4-argon', reasoning_effort: 'high', messages: [{ role: 'user', content: 'hi' }] };
   assert.equal(stripGeminiEncryptedReasoning(chat), 1);
   assert.equal(chat.reasoning_effort, undefined);
+});
+
+test('drops non-function built-in tools for gemini only', () => {
+  const gemini = { model: 'gemini-4-argon', tools: [
+    { type: 'web_search' },
+    { type: 'function', name: 'keep_me', parameters: { type: 'object', properties: {} } },
+  ] };
+  assert.ok(normalizeGeminiTools(gemini) > 0);
+  assert.equal(gemini.tools.length, 1);
+  assert.equal(gemini.tools[0].name, 'keep_me');
+  const gpt = { model: 'gpt-6.1-sol', tools: [{ type: 'web_search' }] };
+  assert.equal(normalizeGeminiTools(gpt), 0);
+  assert.equal(gpt.tools.length, 1);
+});
+
+test('patches gemini response.completed usage fields across chunk splits', async () => {
+  const line = 'data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":10,"output_tokens":5}}}';
+  const patched = patchGeminiCompletedLine(line);
+  const usage = JSON.parse(patched.slice(patched.indexOf('{'))).response.usage;
+  assert.equal(usage.input_tokens_details.cached_tokens, 0);
+  assert.equal(usage.output_tokens_details.reasoning_tokens, 0);
+  assert.equal(usage.total_tokens, 15);
+  assert.equal(patchGeminiCompletedLine('data: {"type":"response.output_text.delta"}'), 'data: {"type":"response.output_text.delta"}');
+  const patcher = createSsePatcher(true);
+  const whole = patcher.push(Buffer.from(line.slice(0, 40))).toString() + patcher.push(Buffer.from(line.slice(40) + '\n\n')).toString() + patcher.flush().toString();
+  assert.match(whole, /cached_tokens/);
+  const upstream = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"type":"response.output_text.delta","delta":"OK"}\n\n');
+    res.end('data: {"type":"response.completed","response":{"id":"r2"}}\n\n');
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const relay = createRelay({ upstream: `http://127.0.0.1:${upstream.address().port}/v1` });
+  await new Promise(resolve => relay.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${relay.server.address().port}`;
+  try {
+    const response = await fetch(`${base}/v1/responses`, { method: 'POST',
+      headers: { authorization: 'Bearer test-key' }, body: '{"model":"gemini-4-argon","stream":true}' });
+    const text = await response.text();
+    assert.match(text, /"delta":"OK"/);
+    assert.match(text, /"cached_tokens":0/);
+    assert.match(text, /"reasoning_tokens":0/);
+  } finally {
+    await relay.close(); upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
 });
 
 test('normalizes namespace tools and provider declaration formats', () => {

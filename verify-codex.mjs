@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import assert from 'node:assert/strict';
@@ -9,7 +9,12 @@ const temp = mkdtempSync(`${root}/compat/geili-schema-relay/verification-`);
 const config = readFileSync(`${root}/config.toml`, 'utf8').split('[desktop]')[0];
 writeFileSync(`${temp}/config.toml`, config);
 const binRoot = `${(process.env.LOCALAPPDATA ?? '').replaceAll('\\', '/')}/OpenAI/Codex/bin`;
-const exe = process.env.CODEX_EXE ?? `${binRoot}/${readdirSync(binRoot).at(-1)}/codex.exe`;
+const exe = process.env.CODEX_EXE ?? readdirSync(binRoot)
+  .map(name => `${binRoot}/${name}/codex.exe`)
+  .filter(candidate => existsSync(candidate))
+  .sort((a, b) => statSync(a).mtimeMs - statSync(b).mtimeMs)
+  .at(-1);
+if (!exe) throw new Error('codex.exe not found under ' + binRoot + '; set CODEX_EXE');
 const child = spawn(exe, ['app-server', '--listen', 'stdio://'], { cwd: temp, env: { ...process.env, CODEX_HOME: temp },
   windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 const requests = new Map();

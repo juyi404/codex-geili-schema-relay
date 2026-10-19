@@ -164,7 +164,17 @@ export function normalizeGeminiTools(payload) {
       }
     }
   }
-  if (Array.isArray(payload.tools)) for (const tool of payload.tools) visit(tool);
+  if (Array.isArray(payload.tools)) {
+    // The gateway's Gemini translation only understands function tools and
+    // rejects whole requests over built-ins ('unsupported Gemini tool type
+    // "web_search"') — drop those tool entries.
+    const kept = payload.tools.filter(tool => !(object(tool) && /^(?:web_search|computer|local_shell|code_interpreter|file_search|image_generation)/.test(String(tool.type ?? ''))));
+    if (kept.length !== payload.tools.length) {
+      changed += payload.tools.length - kept.length;
+      payload.tools = kept;
+    }
+    for (const tool of payload.tools) visit(tool);
+  }
   return changed;
 }
 
@@ -311,6 +321,48 @@ function guardStream(response) {
   });
 }
 
+// New Codex builds strictly deserialize response.completed/incomplete and fail
+// on usage objects without the detail fields ("failed to parse
+// ResponseCompleted: missing field `cached_tokens`"); the gateway's Gemini
+// translation omits them. Fill the gaps with zeros, leaving present values.
+export function patchGeminiCompletedLine(line) {
+  const cr = line.endsWith('\r');
+  const bare = cr ? line.slice(0, -1) : line;
+  if (!/^data:\s*\{/.test(bare)) return line;
+  if (!bare.includes('"response.completed"') && !bare.includes('"response.incomplete"')) return line;
+  try {
+    const idx = bare.indexOf('{');
+    const obj = JSON.parse(bare.slice(idx));
+    const r = obj.response;
+    if (!object(r)) return line;
+    const u = object(r.usage) ? r.usage : (r.usage = {});
+    if (typeof u.input_tokens !== 'number') u.input_tokens = 0;
+    if (typeof u.output_tokens !== 'number') u.output_tokens = 0;
+    if (typeof u.total_tokens !== 'number') u.total_tokens = u.input_tokens + u.output_tokens;
+    u.input_tokens_details = { cached_tokens: 0, ...(object(u.input_tokens_details) ? u.input_tokens_details : {}) };
+    u.output_tokens_details = { reasoning_tokens: 0, ...(object(u.output_tokens_details) ? u.output_tokens_details : {}) };
+    return bare.slice(0, idx) + JSON.stringify(obj) + (cr ? '\r' : '');
+  } catch { return line; }
+}
+
+// Line-buffered SSE rewriter so events split across chunks are still patched.
+export function createSsePatcher(active) {
+  let tail = '';
+  return {
+    push(chunk) {
+      if (!active) return chunk;
+      const lines = (tail + chunk.toString('utf8')).split('\n');
+      tail = lines.pop();
+      return Buffer.from(lines.length ? lines.map(patchGeminiCompletedLine).join('\n') + '\n' : '');
+    },
+    flush() {
+      const rest = tail;
+      tail = '';
+      return Buffer.from(active && rest ? patchGeminiCompletedLine(rest) : rest);
+    },
+  };
+}
+
 export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'test' } = {}) {
   const target = new URL(upstream);
   const controllers = new Set();
@@ -338,12 +390,14 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         chunks.push(Buffer.from(chunk));
       }
       let body = Buffer.concat(chunks);
+      let geminiModel = false;
       // All rewrites are gemini-only; skip the JSON round-trip entirely for
       // payloads that cannot name a gemini model (GPT traffic passes untouched).
       if (req.method === 'POST' && /\/(?:responses(?:\/(?:lite|compact))?|chat\/completions)$/.test(requestUrl.pathname) && body.includes('gemini')) {
         let payload;
         try { payload = JSON.parse(body.toString('utf8')); }
         catch { res.writeHead(400).end('Invalid JSON request'); return; }
+        geminiModel = object(payload) && /(?:^|\/)gemini[-/]/i.test(payload.model ?? '');
         const count = normalizeGeminiTools(payload);
         const stripped = stripGeminiEncryptedReasoning(payload);
         const appended = normalizeGeminiTurns(payload);
@@ -433,12 +487,14 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       }
       if (guarded !== undefined) {
         res.writeHead(response.statusCode ?? 502, headersWithoutHop(response.headers));
-        res.write(guarded.preamble);
-        if (guarded.verdict === 'ended' || response.readableEnded || response.destroyed) { res.end(); return; }
+        const patcher = createSsePatcher(geminiModel);
+        res.write(patcher.push(guarded.preamble));
+        if (guarded.verdict === 'ended' || response.readableEnded || response.destroyed) { res.end(patcher.flush()); return; }
         await new Promise((resolve, reject) => {
+          response.on('data', chunk => res.write(patcher.push(chunk)));
           response.once('error', reject);
-          response.once('end', resolve);
-          response.pipe(res);
+          response.once('end', () => { res.end(patcher.flush()); resolve(); });
+          response.resume();
         });
         return;
       }
