@@ -211,27 +211,44 @@ export function normalizeGeminiTurns(payload) {
 // Codex resends prior turns' reasoning items (and asks for them via include)
 // whenever response storage is off; Gemini cannot use them anyway, so strip.
 // The gateway rejects freeform-tool history items for Gemini ("unsupported
-// Gemini input item type \"custom_tool_call\"") — Codex emits them for
-// freeform tools like apply_patch, and they land in gemini requests whenever
-// a thread switches models. Converting to function_call items trips the
-// gateway's turn folding when the name has no declaration, so render the
-// pair as plain messages instead: pairing-free and always translatable.
+// Gemini input item type \"custom_tool_call\"") and silently DROPS function
+// calls whose name has no declaration in tools (the tool set varies between
+// turns), which can collapse the request tail into a bare model turn
+// ("Requests ending with a model turn are not supported"). Render all such
+// unpairable history as plain messages: pairing-free and always translatable.
 export function convertGeminiCustomToolCalls(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
   if (!Array.isArray(payload.input)) return 0;
+  const declared = new Set();
+  if (Array.isArray(payload.tools)) for (const tool of payload.tools) {
+    if (!object(tool)) continue;
+    const name = tool.name ?? tool.function?.name;
+    if (typeof name === 'string') declared.add(name);
+  }
+  const callNames = new Map();
+  for (const item of payload.input) {
+    if (object(item) && typeof item.call_id === 'string' && typeof item.name === 'string') callNames.set(item.call_id, item.name);
+  }
+  const asText = value => typeof value === 'string' ? value : JSON.stringify(value ?? '');
   let changed = 0;
   for (let i = 0; i < payload.input.length; i++) {
     const item = payload.input[i];
     if (!object(item)) continue;
-    if (item.type === 'custom_tool_call') {
-      payload.input[i] = { type: 'message', role: 'assistant', content: [{ type: 'output_text',
-        text: `[tool call: ${item.name ?? 'tool'}]\n${String(item.input ?? '')}` }] };
-      changed++;
-    } else if (item.type === 'custom_tool_call_output') {
+    const type = String(item.type ?? '');
+    const isCall = /_call$/.test(type);
+    const isOutput = /_call_output$/.test(type);
+    if (!isCall && !isOutput) continue;
+    if (type === 'function_call' && declared.has(item.name)) continue;
+    if (type === 'function_call_output' && declared.has(callNames.get(item.call_id))) continue;
+    if (isOutput) {
       payload.input[i] = { type: 'message', role: 'user', content: [{ type: 'input_text',
-        text: `[tool result]\n${typeof item.output === 'string' ? item.output : JSON.stringify(item.output ?? '')}` }] };
-      changed++;
+        text: `[tool result]\n${asText(item.output)}` }] };
+    } else {
+      const name = item.name ?? callNames.get(item.call_id) ?? type;
+      payload.input[i] = { type: 'message', role: 'assistant', content: [{ type: 'output_text',
+        text: `[tool call: ${name}]\n${asText(item.input ?? item.arguments ?? item.action ?? '')}` }] };
     }
+    changed++;
   }
   return changed;
 }

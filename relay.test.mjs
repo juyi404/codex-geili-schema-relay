@@ -405,6 +405,29 @@ test('converts custom tool call history to plain messages for gemini', () => {
   assert.equal(gpt.input[0].type, 'custom_tool_call');
 });
 
+test('renders undeclared function calls as messages, keeps declared ones', () => {
+  const payload = { model: 'gemini-4-argon',
+    tools: [{ type: 'function', name: 'alive_tool', parameters: { type: 'object', properties: {} } }],
+    input: [
+      { type: 'function_call', call_id: 'c1', name: 'alive_tool', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'c1', output: 'kept structural' },
+      { type: 'function_call', call_id: 'c2', name: 'ghost_tool', arguments: '{"a":1}' },
+      { type: 'function_call_output', call_id: 'c2', output: 'ghost result' },
+      { type: 'web_search_call', id: 'ws1', action: { query: 'x' } },
+    ] };
+  assert.equal(convertGeminiCustomToolCalls(payload), 3);
+  assert.equal(payload.input[0].type, 'function_call');
+  assert.equal(payload.input[1].type, 'function_call_output');
+  assert.equal(payload.input[2].role, 'assistant');
+  assert.match(payload.input[2].content[0].text, /ghost_tool/);
+  assert.equal(payload.input[3].role, 'user');
+  assert.match(payload.input[3].content[0].text, /ghost result/);
+  assert.equal(payload.input[4].role, 'assistant');
+  assert.match(payload.input[4].content[0].text, /web_search_call|query/);
+  assert.equal(normalizeGeminiTurns(payload), 1);
+  assert.equal(payload.input.at(-1).role, 'user');
+});
+
 test('normalizes namespace tools and provider declaration formats', () => {
   for (const tool of [
     { type: 'namespace', tools: [{ type: 'function', parameters: parameters() }] },
