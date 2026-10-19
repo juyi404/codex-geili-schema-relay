@@ -446,6 +446,38 @@ test('renders undeclared function calls as messages, keeps declared ones', () =>
   assert.equal(payload.input.at(-1).role, 'user');
 });
 
+test('resends with an appended continue turn when the gateway reports a trailing model turn', async () => {
+  const bodies = [];
+  const upstream = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    bodies.push(Buffer.concat(chunks).toString());
+    if (bodies.length === 1) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end('{"error":{"message":"Requests ending with a model turn are not supported."}}');
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    }
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const relay = createRelay({ upstream: `http://127.0.0.1:${upstream.address().port}/v1` });
+  await new Promise(resolve => relay.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${relay.server.address().port}`;
+  try {
+    const response = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer test-key' },
+      body: JSON.stringify({ model: 'gemini-4-argon', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] }) });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), '{"ok":true}');
+    assert.equal(bodies.length, 2);
+    assert.doesNotMatch(bodies[0], /Continue from exactly/);
+    assert.match(bodies[1], /Continue from exactly where you left off/);
+    assert.doesNotMatch(bodies[1], /_relayContinueAppended/);
+  } finally {
+    await relay.close(); upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test('normalizes namespace tools and provider declaration formats', () => {
   for (const tool of [
     { type: 'namespace', tools: [{ type: 'function', parameters: parameters() }] },

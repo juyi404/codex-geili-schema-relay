@@ -469,6 +469,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       }
       let body = Buffer.concat(chunks);
       let geminiModel = false;
+      let geminiPayload;
       // All rewrites are gemini-only; skip the JSON round-trip entirely for
       // payloads that cannot name a gemini model (GPT traffic passes untouched).
       if (req.method === 'POST' && /\/(?:responses(?:\/(?:lite|compact))?|chat\/completions)$/.test(requestUrl.pathname) && body.includes('gemini')) {
@@ -476,6 +477,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         try { payload = JSON.parse(body.toString('utf8')); }
         catch { res.writeHead(400).end('Invalid JSON request'); return; }
         geminiModel = object(payload) && /(?:^|\/)gemini[-/]/i.test(payload.model ?? '');
+        if (geminiModel) geminiPayload = payload;
         const count = normalizeGeminiTools(payload);
         const stripped = stripGeminiEncryptedReasoning(payload);
         const converted = convertGeminiCustomToolCalls(payload);
@@ -552,6 +554,23 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         catch { text = errorBody.toString('utf8'); }
         const misroute = MISROUTE.test(text);
         const transient5xx = (response.statusCode ?? 0) >= 500;
+        // Whatever shape the gateway folded into a trailing model turn, the
+        // remedy is always the same: append a user continue turn and resend.
+        if (/Requests ending with a model turn/i.test(text) && geminiPayload && !geminiPayload._relayContinueAppended) {
+          geminiPayload._relayContinueAppended = true;
+          const list = Array.isArray(geminiPayload.input) ? geminiPayload.input
+            : Array.isArray(geminiPayload.messages) ? geminiPayload.messages : undefined;
+          if (list) {
+            list.push(Array.isArray(geminiPayload.input)
+              ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue from exactly where you left off.' }] }
+              : { role: 'user', content: 'Continue from exactly where you left off.' });
+            const { _relayContinueAppended, ...clean } = geminiPayload;
+            body = Buffer.from(JSON.stringify(clean));
+            headers['content-length'] = String(body.length);
+            log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1, reason: 'model_turn_fallback' });
+            continue;
+          }
+        }
         if (!misroute && !transient5xx && !EXHAUSTED.test(text)) break;
         log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1,
           reason: misroute ? 'dialect_misroute' : EXHAUSTED.test(text) ? 'accounts_exhausted' : 'server_5xx' });
