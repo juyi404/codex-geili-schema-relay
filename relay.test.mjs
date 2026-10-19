@@ -315,15 +315,16 @@ test('adapts chat_completions-shaped gemini payloads (Hermes)', () => {
 
 test('strips encrypted reasoning from gemini requests', () => {
   const payload = { model: 'gemini-4-argon', include: ['reasoning.encrypted_content'],
-    reasoning: { effort: 'high', summary: 'auto' }, input: [
+    reasoning: { effort: 'high', summary: 'auto' }, parallel_tool_calls: false, input: [
     { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
     { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'gAAAAABblob' },
     { type: 'reasoning', id: 'rs_2', summary: [{ type: 'summary_text', text: 'kept summary' }], encrypted_content: 'gAAAAABblob2' },
     { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] },
   ] };
-  assert.equal(stripGeminiEncryptedReasoning(payload), 4);
+  assert.equal(stripGeminiEncryptedReasoning(payload), 5);
   assert.equal(payload.include, undefined);
   assert.equal(payload.reasoning, undefined);
+  assert.equal(payload.parallel_tool_calls, undefined);
   assert.equal(payload.input.length, 3);
   assert.equal(payload.input[1].type, 'reasoning');
   assert.equal('encrypted_content' in payload.input[1], false);

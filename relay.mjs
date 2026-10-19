@@ -244,6 +244,8 @@ export function stripGeminiEncryptedReasoning(payload) {
   // no effort-specific model variants — drop it and let Gemini use its default.
   if (payload.reasoning !== undefined) { delete payload.reasoning; changed++; }
   if (payload.reasoning_effort !== undefined) { delete payload.reasoning_effort; changed++; }
+  // "parallel_tool_calls=false is unsupported by Gemini native function calling"
+  if (payload.parallel_tool_calls !== undefined) { delete payload.parallel_tool_calls; changed++; }
   if (Array.isArray(payload.include)) {
     const kept = payload.include.filter(entry => !/encrypted_content/.test(String(entry)));
     if (kept.length !== payload.include.length) {
