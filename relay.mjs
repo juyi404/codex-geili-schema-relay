@@ -266,13 +266,16 @@ export function convertGeminiCustomToolCalls(payload) {
       changed++;
       continue;
     }
+    // Render unpairable history as third-person session-log notes in USER
+    // role: an assistant-voiced "[tool call: ...]" rendering taught Gemini to
+    // IMITATE the format in chat text instead of invoking tools.
     if (isOutput) {
       payload.input[i] = { type: 'message', role: 'user', content: [{ type: 'input_text',
-        text: `[tool result]\n${asText(item.output)}` }] };
+        text: `[session log] That tool call returned:\n${asText(item.output)}` }] };
     } else {
       const name = item.name ?? callNames.get(item.call_id) ?? type;
-      payload.input[i] = { type: 'message', role: 'assistant', content: [{ type: 'output_text',
-        text: `[tool call: ${name}]\n${asText(item.input ?? item.arguments ?? item.action ?? '')}` }] };
+      payload.input[i] = { type: 'message', role: 'user', content: [{ type: 'input_text',
+        text: `[session log] Earlier, the assistant invoked the tool \`${name}\` (via the function-calling mechanism, not as chat text) with input:\n${asText(item.input ?? item.arguments ?? item.action ?? '')}` }] };
     }
     changed++;
   }

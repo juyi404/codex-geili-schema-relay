@@ -395,10 +395,10 @@ test('converts custom tool call history to plain messages for gemini', () => {
   ] };
   assert.equal(convertGeminiCustomToolCalls(payload), 2);
   assert.equal(payload.input[0].type, 'message');
-  assert.equal(payload.input[0].role, 'assistant');
-  assert.match(payload.input[0].content[0].text, /apply_patch[\s\S]*Begin Patch/);
+  assert.equal(payload.input[0].role, 'user');
+  assert.match(payload.input[0].content[0].text, /session log[\s\S]*apply_patch[\s\S]*Begin Patch/);
   assert.equal(payload.input[1].role, 'user');
-  assert.match(payload.input[1].content[0].text, /tool result[\s\S]*ok/);
+  assert.match(payload.input[1].content[0].text, /session log[\s\S]*ok/);
   assert.equal(convertGeminiCustomToolCalls(payload), 0);
   const gpt = { model: 'gpt-6.1-sol', input: [{ type: 'custom_tool_call', call_id: 'c1', name: 'x', input: 'y' }] };
   assert.equal(convertGeminiCustomToolCalls(gpt), 0);
@@ -436,13 +436,13 @@ test('renders undeclared function calls as messages, keeps declared ones', () =>
   assert.equal(convertGeminiCustomToolCalls(payload), 3);
   assert.equal(payload.input[0].type, 'function_call');
   assert.equal(payload.input[1].type, 'function_call_output');
-  assert.equal(payload.input[2].role, 'assistant');
+  assert.equal(payload.input[2].role, 'user');
   assert.match(payload.input[2].content[0].text, /ghost_tool/);
   assert.equal(payload.input[3].role, 'user');
   assert.match(payload.input[3].content[0].text, /ghost result/);
-  assert.equal(payload.input[4].role, 'assistant');
+  assert.equal(payload.input[4].role, 'user');
   assert.match(payload.input[4].content[0].text, /web_search_call|query/);
-  assert.equal(normalizeGeminiTurns(payload), 1);
+  assert.equal(normalizeGeminiTurns(payload), 0);
   assert.equal(payload.input.at(-1).role, 'user');
 });
 
