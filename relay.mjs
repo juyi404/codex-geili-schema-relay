@@ -196,6 +196,11 @@ export function normalizeGeminiTurns(payload) {
 export function stripGeminiEncryptedReasoning(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
   let changed = 0;
+  // The gateway now rejects any reasoning-effort field for gemini ("reasoning
+  // effort requires an explicit supported Gemini upstream model") and offers
+  // no effort-specific model variants — drop it and let Gemini use its default.
+  if (payload.reasoning !== undefined) { delete payload.reasoning; changed++; }
+  if (payload.reasoning_effort !== undefined) { delete payload.reasoning_effort; changed++; }
   if (Array.isArray(payload.include)) {
     const kept = payload.include.filter(entry => !/encrypted_content/.test(String(entry)));
     if (kept.length !== payload.include.length) {
@@ -412,9 +417,10 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         try { text = response.headers['content-encoding'] === 'gzip' ? gunzipSync(errorBody).toString('utf8') : errorBody.toString('utf8'); }
         catch { text = errorBody.toString('utf8'); }
         const misroute = MISROUTE.test(text);
-        if (!misroute && !EXHAUSTED.test(text)) break;
+        const transient5xx = (response.statusCode ?? 0) >= 500;
+        if (!misroute && !transient5xx && !EXHAUSTED.test(text)) break;
         log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1,
-          reason: misroute ? 'dialect_misroute' : 'accounts_exhausted' });
+          reason: misroute ? 'dialect_misroute' : EXHAUSTED.test(text) ? 'accounts_exhausted' : 'server_5xx' });
         await new Promise(resolve => setTimeout(resolve, (misroute ? 300 : 1500) * (attempt + 1)));
       }
       if (response.statusCode >= 300 && response.statusCode < 400) {

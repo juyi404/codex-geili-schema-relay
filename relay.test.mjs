@@ -311,14 +311,16 @@ test('adapts chat_completions-shaped gemini payloads (Hermes)', () => {
 });
 
 test('strips encrypted reasoning from gemini requests', () => {
-  const payload = { model: 'gemini-4-argon', include: ['reasoning.encrypted_content'], input: [
+  const payload = { model: 'gemini-4-argon', include: ['reasoning.encrypted_content'],
+    reasoning: { effort: 'high', summary: 'auto' }, input: [
     { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
     { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'gAAAAABblob' },
     { type: 'reasoning', id: 'rs_2', summary: [{ type: 'summary_text', text: 'kept summary' }], encrypted_content: 'gAAAAABblob2' },
     { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] },
   ] };
-  assert.equal(stripGeminiEncryptedReasoning(payload), 3);
+  assert.equal(stripGeminiEncryptedReasoning(payload), 4);
   assert.equal(payload.include, undefined);
+  assert.equal(payload.reasoning, undefined);
   assert.equal(payload.input.length, 3);
   assert.equal(payload.input[1].type, 'reasoning');
   assert.equal('encrypted_content' in payload.input[1], false);
@@ -326,9 +328,13 @@ test('strips encrypted reasoning from gemini requests', () => {
   assert.equal(stripGeminiEncryptedReasoning(payload), 0);
   assert.equal(normalizeGeminiTurns(payload), 1);
   assert.equal(payload.input.at(-1).role, 'user');
-  const gpt = { model: 'gpt-6.1-sol', include: ['reasoning.encrypted_content'], input: [{ type: 'reasoning', encrypted_content: 'x' }] };
+  const gpt = { model: 'gpt-6.1-sol', include: ['reasoning.encrypted_content'], reasoning: { effort: 'high' }, input: [{ type: 'reasoning', encrypted_content: 'x' }] };
   assert.equal(stripGeminiEncryptedReasoning(gpt), 0);
   assert.deepEqual(gpt.include, ['reasoning.encrypted_content']);
+  assert.deepEqual(gpt.reasoning, { effort: 'high' });
+  const chat = { model: 'gemini-4-argon', reasoning_effort: 'high', messages: [{ role: 'user', content: 'hi' }] };
+  assert.equal(stripGeminiEncryptedReasoning(chat), 1);
+  assert.equal(chat.reasoning_effort, undefined);
 });
 
 test('normalizes namespace tools and provider declaration formats', () => {
