@@ -318,7 +318,7 @@ export function stripGeminiEncryptedReasoning(payload) {
 // away from monster single responses so it never gets near the ceiling.
 // Codex carries its system prompt as leading developer items in `input`
 // (there is no top-level `instructions` string), so inject there.
-const OUTPUT_GUIDANCE = '<output_budget>Hard limit: one response is cut off near 60000 tokens including hidden thinking, and the cutoff surfaces to the user as an error. Never emit one huge response. Write files in chunks of at most ~250 lines, extending them across subsequent steps. Prefer many small steps over one large one. Never write tool invocations as plain text (such as "[tool call: ...]" or "*** Begin Patch" in a chat message); always invoke tools through the function-calling mechanism.</output_budget>';
+const OUTPUT_GUIDANCE = '<output_budget>Hard limit: one response is cut off near 60000 tokens including hidden thinking, and the cutoff surfaces to the user as an error. Never emit one huge response. Write files in chunks of at most ~250 lines, extending them across subsequent steps. Prefer many small steps over one large one. Tool use must always go through the function-calling mechanism; never describe, narrate, or type out a tool invocation or its arguments inside a chat message, and if a needed tool is unavailable, say so in prose instead.</output_budget>';
 export function injectGeminiOutputGuidance(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
   if (typeof payload.instructions === 'string') {
