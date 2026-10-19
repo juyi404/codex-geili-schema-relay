@@ -189,6 +189,34 @@ export function normalizeGeminiTurns(payload) {
   return 1;
 }
 
+// The gateway rejects whole requests carrying OpenAI encrypted reasoning
+// ("OpenAI encrypted reasoning is unsupported for Gemini compatibility").
+// Codex resends prior turns' reasoning items (and asks for them via include)
+// whenever response storage is off; Gemini cannot use them anyway, so strip.
+export function stripGeminiEncryptedReasoning(payload) {
+  if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
+  let changed = 0;
+  if (Array.isArray(payload.include)) {
+    const kept = payload.include.filter(entry => !/encrypted_content/.test(String(entry)));
+    if (kept.length !== payload.include.length) {
+      if (kept.length) payload.include = kept; else delete payload.include;
+      changed++;
+    }
+  }
+  if (Array.isArray(payload.input)) {
+    for (let i = payload.input.length - 1; i >= 0; i--) {
+      const item = payload.input[i];
+      if (!object(item) || item.type !== 'reasoning' || !('encrypted_content' in item)) continue;
+      delete item.encrypted_content;
+      const summaries = Array.isArray(item.summary) ? item.summary : [];
+      const hasContent = summaries.length > 0 || (Array.isArray(item.content) && item.content.length > 0);
+      if (!hasContent) payload.input.splice(i, 1);
+      changed++;
+    }
+  }
+  return changed;
+}
+
 // Gemini has a hard per-response output ceiling (~64k tokens including hidden
 // thinking) and Codex surfaces hitting it as a stream error. Steer the model
 // away from monster single responses so it never gets near the ceiling.
@@ -312,15 +340,17 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         try { payload = JSON.parse(body.toString('utf8')); }
         catch { res.writeHead(400).end('Invalid JSON request'); return; }
         const count = normalizeGeminiTools(payload);
+        const stripped = stripGeminiEncryptedReasoning(payload);
         const appended = normalizeGeminiTurns(payload);
         const guided = injectGeminiOutputGuidance(payload);
         const capped = injectGeminiMaxOutput(payload);
-        if (count || appended || guided || capped) {
+        if (count || stripped || appended || guided || capped) {
           body = Buffer.from(JSON.stringify(payload));
           normalizedRequests++;
           normalizedConstraints += count;
-          log({ event: 'gemini_schema_normalized', count, max_output_tokens: payload.max_output_tokens ?? null,
+          log({ event: 'gemini_schema_normalized', count, max_output_tokens: payload.max_output_tokens ?? payload.max_tokens ?? null,
             ...(capped ? { max_output_tokens_injected: true } : {}),
+            ...(stripped ? { encrypted_reasoning_stripped: stripped } : {}),
             ...(appended ? { appended_continue_turn: true } : {}), ...(guided ? { output_guidance: true } : {}) });
         }
       }

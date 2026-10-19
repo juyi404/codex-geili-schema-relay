@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, createRelay, SERVICE } from './relay.mjs';
+import { normalizeGeminiTools, normalizeGeminiTurns, injectGeminiOutputGuidance, injectGeminiMaxOutput, stripGeminiEncryptedReasoning, createRelay, SERVICE } from './relay.mjs';
 
 const parameters = () => ({ type: 'object', properties: {
   enabled: { type: 'boolean', enum: [true] },
@@ -308,6 +308,27 @@ test('adapts chat_completions-shaped gemini payloads (Hermes)', () => {
   const explicit = { model: 'gemini-4-argon', messages: [{ role: 'user', content: 'x' }], max_tokens: 100 };
   assert.equal(injectGeminiMaxOutput(explicit), 0);
   assert.equal(explicit.max_tokens, 100);
+});
+
+test('strips encrypted reasoning from gemini requests', () => {
+  const payload = { model: 'gemini-4-argon', include: ['reasoning.encrypted_content'], input: [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+    { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'gAAAAABblob' },
+    { type: 'reasoning', id: 'rs_2', summary: [{ type: 'summary_text', text: 'kept summary' }], encrypted_content: 'gAAAAABblob2' },
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] },
+  ] };
+  assert.equal(stripGeminiEncryptedReasoning(payload), 3);
+  assert.equal(payload.include, undefined);
+  assert.equal(payload.input.length, 3);
+  assert.equal(payload.input[1].type, 'reasoning');
+  assert.equal('encrypted_content' in payload.input[1], false);
+  assert.equal(payload.input[1].summary[0].text, 'kept summary');
+  assert.equal(stripGeminiEncryptedReasoning(payload), 0);
+  assert.equal(normalizeGeminiTurns(payload), 1);
+  assert.equal(payload.input.at(-1).role, 'user');
+  const gpt = { model: 'gpt-6.1-sol', include: ['reasoning.encrypted_content'], input: [{ type: 'reasoning', encrypted_content: 'x' }] };
+  assert.equal(stripGeminiEncryptedReasoning(gpt), 0);
+  assert.deepEqual(gpt.include, ['reasoning.encrypted_content']);
 });
 
 test('normalizes namespace tools and provider declaration formats', () => {
