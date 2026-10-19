@@ -57,7 +57,7 @@ test('flattens nullable anyOf params that GeiliAPI strips (sectionId regression)
   }, additionalProperties: false };
   const payload = { model: 'gemini-4-argon', tools: [{ type: 'function', name: 'mcp__codex_app__move_project_to_sidebar_section', parameters: schema }] };
   assert.ok(normalizeGeminiTools(payload) > 0);
-  assert.deepEqual(schema.properties.sectionId, { type: 'string', nullable: true, description: 'Target section id, or null to ungroup.' });
+  assert.deepEqual(schema.properties.sectionId, { type: 'string', description: 'Target section id, or null to ungroup. May be null.' });
   assert.equal(normalizeGeminiTools(payload), 0);
 });
 
@@ -87,7 +87,8 @@ test('resolves refs and rewrites combinators and draft keywords for Gemini', () 
   assert.deepEqual(Object.keys(schema.properties.options.properties).sort(), ['a', 'b']);
   assert.deepEqual([...schema.properties.options.required].sort(), ['a', 'b']);
   assert.equal(schema.properties.maybe.type, 'string');
-  assert.equal(schema.properties.maybe.nullable, true);
+  assert.equal(schema.properties.maybe.nullable, undefined);
+  assert.match(schema.properties.maybe.description, /May be null/);
   assert.deepEqual(schema.properties.fixed.enum, ['pinned']);
   assert.equal(schema.properties.fixed.type, 'string');
   assert.deepEqual(schema.properties.coords.items, { type: 'number' });
@@ -274,7 +275,8 @@ test('merges anyOf branch properties and prunes required to declared properties'
   assert.ok(normalizeGeminiTools(payload) > 0);
   assert.deepEqual(Object.keys(schema.properties).sort(), ['keep', 'mode']);
   assert.equal(schema.required, undefined);
-  assert.equal(schema.nullable, true);
+  assert.equal(schema.nullable, undefined);
+  assert.match(schema.description ?? '', /May be null/);
   const pruned = { type: 'object', properties: { a: { type: 'string' } }, required: ['a', 'mode'] };
   assert.ok(normalizeGeminiTools({ model: 'gemini-4-argon', tools: [{ type: 'function', name: 'p2', parameters: pruned }] }) > 0);
   assert.deepEqual(pruned.required, ['a']);
@@ -295,7 +297,8 @@ test('adapts chat_completions-shaped gemini payloads (Hermes)', () => {
   assert.equal(injectGeminiMaxOutput(payload), 1);
   const params = payload.tools[0].function.parameters;
   assert.equal(params.properties.sectionId.type, 'string');
-  assert.equal(params.properties.sectionId.nullable, true);
+  assert.equal(params.properties.sectionId.nullable, undefined);
+  assert.match(params.properties.sectionId.description ?? '', /May be null/);
   assert.equal(payload.messages.at(-1).role, 'user');
   assert.match(payload.messages.at(-1).content, /Continue from exactly/);
   assert.equal(payload.messages[1].role, 'system');

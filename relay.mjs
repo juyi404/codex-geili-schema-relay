@@ -13,6 +13,13 @@ const MAX_BODY = 128 * 1024 * 1024;
 const HOP = ['host', 'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const clip = (text, max) => text.length > max ? `${text.slice(0, max)}…` : text;
+// The gateway rejects the `nullable` keyword outright ("unsupported Gemini
+// JSON schema keyword") — express nullability as a description hint instead.
+const noteNull = schema => {
+  if (!/May be null\./.test(schema.description ?? '')) {
+    schema.description = [schema.description, 'May be null.'].filter(Boolean).join(' ');
+  }
+};
 
 function resolvePointer(ref, root) {
   if (typeof ref !== 'string' || !ref.startsWith('#/')) return undefined;
@@ -65,7 +72,7 @@ function normalizeSchema(schema, root = schema, chain = new Set()) {
   // that Gemini rejects — flatten to the first non-null member plus nullable.
   if (Array.isArray(schema.anyOf)) {
     const members = schema.anyOf.filter(object);
-    if (members.some(member => member.type === 'null')) schema.nullable = true;
+    if (members.some(member => member.type === 'null')) noteNull(schema);
     const kept = members.filter(member => member.type !== 'null');
     for (const member of kept) changed += normalizeSchema(member, root, chain);
     const [first, ...rest] = kept;
@@ -84,7 +91,7 @@ function normalizeSchema(schema, root = schema, chain = new Set()) {
     changed++;
   }
   if (Array.isArray(schema.type)) {
-    if (schema.type.includes('null')) schema.nullable = true;
+    if (schema.type.includes('null')) noteNull(schema);
     schema.type = schema.type.find(entry => entry !== 'null');
     changed++;
   }
@@ -117,7 +124,7 @@ function normalizeSchema(schema, root = schema, chain = new Set()) {
       changed++;
     }
   }
-  for (const key of ['not', 'if', 'then', 'else', 'dependentSchemas', 'dependentRequired', 'patternProperties', 'unevaluatedProperties', 'unevaluatedItems', 'propertyNames', 'contains', 'minContains', 'maxContains', '$schema', '$id', '$comment', '$anchor', '$dynamicRef', '$dynamicAnchor']) {
+  for (const key of ['nullable', 'not', 'if', 'then', 'else', 'dependentSchemas', 'dependentRequired', 'patternProperties', 'unevaluatedProperties', 'unevaluatedItems', 'propertyNames', 'contains', 'minContains', 'maxContains', '$schema', '$id', '$comment', '$anchor', '$dynamicRef', '$dynamicAnchor']) {
     if (key in schema) { delete schema[key]; changed++; }
   }
   // Gemini rejects any schema node without an explicit type.
