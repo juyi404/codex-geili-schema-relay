@@ -180,6 +180,17 @@ export function normalizeGeminiTools(payload) {
       changed += payload.tools.length - kept.length;
       payload.tools = kept;
     }
+    // Freeform (custom) tools like apply_patch are not translatable either;
+    // re-declare them as single-string-argument function tools.
+    for (let i = 0; i < payload.tools.length; i++) {
+      const tool = payload.tools[i];
+      if (!object(tool) || tool.type !== 'custom' || typeof tool.name !== 'string') continue;
+      payload.tools[i] = { type: 'function', name: tool.name,
+        description: `${tool.description ?? ''} Pass the complete raw tool input in the "input" string argument.`.trim(),
+        parameters: { type: 'object', properties: { input: { type: 'string', description: 'The full raw input text for this tool.' } },
+          required: ['input'], additionalProperties: false } };
+      changed++;
+    }
     for (const tool of payload.tools) visit(tool);
   }
   return changed;
@@ -240,6 +251,21 @@ export function convertGeminiCustomToolCalls(payload) {
     if (!isCall && !isOutput) continue;
     if (type === 'function_call' && declared.has(item.name)) continue;
     if (type === 'function_call_output' && declared.has(callNames.get(item.call_id))) continue;
+    // Freeform tool history whose tool is declared (as a converted function
+    // tool) stays structural so the model keeps making real tool calls
+    // instead of imitating text renderings.
+    if (type === 'custom_tool_call' && declared.has(item.name)) {
+      payload.input[i] = { type: 'function_call', ...(item.id ? { id: item.id } : {}), call_id: item.call_id,
+        name: item.name, arguments: JSON.stringify({ input: String(item.input ?? '') }) };
+      changed++;
+      continue;
+    }
+    if (type === 'custom_tool_call_output' && declared.has(callNames.get(item.call_id))) {
+      payload.input[i] = { type: 'function_call_output', ...(item.id ? { id: item.id } : {}), call_id: item.call_id,
+        output: asText(item.output) };
+      changed++;
+      continue;
+    }
     if (isOutput) {
       payload.input[i] = { type: 'message', role: 'user', content: [{ type: 'input_text',
         text: `[tool result]\n${asText(item.output)}` }] };
@@ -289,7 +315,7 @@ export function stripGeminiEncryptedReasoning(payload) {
 // away from monster single responses so it never gets near the ceiling.
 // Codex carries its system prompt as leading developer items in `input`
 // (there is no top-level `instructions` string), so inject there.
-const OUTPUT_GUIDANCE = '<output_budget>Hard limit: one response is cut off near 60000 tokens including hidden thinking, and the cutoff surfaces to the user as an error. Never emit one huge response. Write files in chunks of at most ~250 lines, extending them across subsequent steps. Prefer many small steps over one large one.</output_budget>';
+const OUTPUT_GUIDANCE = '<output_budget>Hard limit: one response is cut off near 60000 tokens including hidden thinking, and the cutoff surfaces to the user as an error. Never emit one huge response. Write files in chunks of at most ~250 lines, extending them across subsequent steps. Prefer many small steps over one large one. Never write tool invocations as plain text (such as "[tool call: ...]" or "*** Begin Patch" in a chat message); always invoke tools through the function-calling mechanism.</output_budget>';
 export function injectGeminiOutputGuidance(payload) {
   if (!object(payload) || !/(?:^|\/)gemini[-/]/i.test(payload.model ?? '')) return 0;
   if (typeof payload.instructions === 'string') {

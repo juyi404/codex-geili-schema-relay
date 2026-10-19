@@ -405,6 +405,24 @@ test('converts custom tool call history to plain messages for gemini', () => {
   assert.equal(gpt.input[0].type, 'custom_tool_call');
 });
 
+test('converts freeform tools and their history to function form for gemini', () => {
+  const payload = { model: 'gemini-4-argon',
+    tools: [{ type: 'custom', name: 'apply_patch', description: 'Edit files.' }],
+    input: [
+      { type: 'custom_tool_call', call_id: 'c1', name: 'apply_patch', input: '*** Begin Patch' },
+      { type: 'custom_tool_call_output', call_id: 'c1', output: 'ok' },
+    ] };
+  assert.ok(normalizeGeminiTools(payload) > 0);
+  assert.equal(payload.tools[0].type, 'function');
+  assert.equal(payload.tools[0].name, 'apply_patch');
+  assert.equal(payload.tools[0].parameters.properties.input.type, 'string');
+  assert.equal(convertGeminiCustomToolCalls(payload), 2);
+  assert.equal(payload.input[0].type, 'function_call');
+  assert.equal(JSON.parse(payload.input[0].arguments).input, '*** Begin Patch');
+  assert.equal(payload.input[1].type, 'function_call_output');
+  assert.equal(payload.input[1].output, 'ok');
+});
+
 test('renders undeclared function calls as messages, keeps declared ones', () => {
   const payload = { model: 'gemini-4-argon',
     tools: [{ type: 'function', name: 'alive_tool', parameters: { type: 'object', properties: {} } }],
