@@ -395,6 +395,7 @@ function guardStream(response) {
       const text = Buffer.concat(chunks).toString('utf8');
       if (STREAM_CONTENT.test(text) || size > 262144) finish('pipe');
       else if (STREAM_RETRYABLE.test(text)) finish('retry');
+      else if (/Requests ending with a model turn/i.test(text)) finish('retry_model_turn');
     };
     response.on('data', onData);
     response.once('end', onEnd);
@@ -520,6 +521,22 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       // per-attempt transients, so re-sending re-rolls them.
       const MISROUTE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"/;
       const EXHAUSTED = /All available accounts exhausted/i;
+      // Whatever shape folded into a trailing model turn, the remedy is always
+      // the same: append a user continue turn and resend (once).
+      const appendContinueTurn = () => {
+        if (!geminiPayload || geminiPayload._relayContinueAppended) return false;
+        geminiPayload._relayContinueAppended = true;
+        const isInput = Array.isArray(geminiPayload.input);
+        const list = isInput ? geminiPayload.input : Array.isArray(geminiPayload.messages) ? geminiPayload.messages : undefined;
+        if (!list) return false;
+        list.push(isInput
+          ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue from exactly where you left off.' }] }
+          : { role: 'user', content: 'Continue from exactly where you left off.' });
+        const { _relayContinueAppended, ...clean } = geminiPayload;
+        body = Buffer.from(JSON.stringify(clean));
+        headers['content-length'] = String(body.length);
+        return true;
+      };
       let response;
       let errorBody;
       let guarded;
@@ -541,9 +558,12 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         if (status < 300) {
           if (!/text\/event-stream/.test(String(response.headers['content-type'] ?? ''))) break;
           guarded = await guardStream(response);
-          if (guarded.verdict !== 'retry' || attempt >= 4) break;
+          const retryable = guarded.verdict === 'retry' || guarded.verdict === 'retry_model_turn';
+          if (!retryable || attempt >= 4) break;
+          if (guarded.verdict === 'retry_model_turn' && !appendContinueTurn()) break;
           response.destroy();
-          log({ event: 'upstream_misroute_retry', status, attempt: attempt + 1, reason: 'sse_early_error' });
+          log({ event: 'upstream_misroute_retry', status, attempt: attempt + 1,
+            reason: guarded.verdict === 'retry_model_turn' ? 'model_turn_fallback_sse' : 'sse_early_error' });
           await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1)));
           continue;
         }
@@ -557,22 +577,9 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         catch { text = errorBody.toString('utf8'); }
         const misroute = MISROUTE.test(text);
         const transient5xx = (response.statusCode ?? 0) >= 500;
-        // Whatever shape the gateway folded into a trailing model turn, the
-        // remedy is always the same: append a user continue turn and resend.
-        if (/Requests ending with a model turn/i.test(text) && geminiPayload && !geminiPayload._relayContinueAppended) {
-          geminiPayload._relayContinueAppended = true;
-          const list = Array.isArray(geminiPayload.input) ? geminiPayload.input
-            : Array.isArray(geminiPayload.messages) ? geminiPayload.messages : undefined;
-          if (list) {
-            list.push(Array.isArray(geminiPayload.input)
-              ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue from exactly where you left off.' }] }
-              : { role: 'user', content: 'Continue from exactly where you left off.' });
-            const { _relayContinueAppended, ...clean } = geminiPayload;
-            body = Buffer.from(JSON.stringify(clean));
-            headers['content-length'] = String(body.length);
-            log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1, reason: 'model_turn_fallback' });
-            continue;
-          }
+        if (/Requests ending with a model turn/i.test(text) && appendContinueTurn()) {
+          log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1, reason: 'model_turn_fallback' });
+          continue;
         }
         if (!misroute && !transient5xx && !EXHAUSTED.test(text)) break;
         log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1,

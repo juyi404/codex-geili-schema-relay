@@ -224,6 +224,39 @@ test('pins max_output_tokens for gemini requests that lack one', () => {
   assert.equal(gpt.max_output_tokens, undefined);
 });
 
+test('appends the continue turn when the model-turn error arrives in-stream', async () => {
+  const bodies = [];
+  const upstream = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    bodies.push(Buffer.concat(chunks).toString());
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (bodies.length === 1) {
+      res.write('event: error\n');
+      res.end('data: {"type":"error","error":{"message":"Requests ending with a model turn are not supported."}}\n\n');
+    } else {
+      res.write('data: {"type":"response.output_text.delta","delta":"OK"}\n\n');
+      res.end('data: {"type":"response.completed","response":{"id":"r9"}}\n\n');
+    }
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const relay = createRelay({ upstream: `http://127.0.0.1:${upstream.address().port}/v1` });
+  await new Promise(resolve => relay.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${relay.server.address().port}`;
+  try {
+    const response = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer test-key' },
+      body: JSON.stringify({ model: 'gemini-4-argon', stream: true, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] }) });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /response\.completed/);
+    assert.doesNotMatch(text, /model turn/);
+    assert.equal(bodies.length, 2);
+    assert.match(bodies[1], /Continue from exactly where you left off/);
+  } finally {
+    await relay.close(); upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test('retries SSE streams that error before any output; forwards fatal ones', async () => {
   let hits = 0;
   let mode = 'misroute-then-ok';
