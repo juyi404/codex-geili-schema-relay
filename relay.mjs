@@ -521,18 +521,49 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
       // per-attempt transients, so re-sending re-rolls them.
       const MISROUTE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"/;
       const EXHAUSTED = /All available accounts exhausted/i;
-      // Whatever shape folded into a trailing model turn, the remedy is always
-      // the same: append a user continue turn and resend (once).
-      const appendContinueTurn = () => {
-        if (!geminiPayload || geminiPayload._relayContinueAppended) return false;
-        geminiPayload._relayContinueAppended = true;
+      // Whatever shape folded into a trailing model turn, repair and resend —
+      // escalating: stage 1 synthesizes outputs for unpaired function calls
+      // and appends a user continue turn; stage 2 (if the gateway still
+      // rejects) renders all call-like history as plain text, which a
+      // messages-only request always survives.
+      const repairModelTurn = () => {
+        if (!geminiPayload) return false;
+        const stage = (geminiPayload._relayRepair ?? 0) + 1;
+        if (stage > 2) return false;
+        geminiPayload._relayRepair = stage;
         const isInput = Array.isArray(geminiPayload.input);
         const list = isInput ? geminiPayload.input : Array.isArray(geminiPayload.messages) ? geminiPayload.messages : undefined;
         if (!list) return false;
-        list.push(isInput
-          ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue from exactly where you left off.' }] }
-          : { role: 'user', content: 'Continue from exactly where you left off.' });
-        const { _relayContinueAppended, ...clean } = geminiPayload;
+        if (stage === 1 && isInput) {
+          const outputs = new Set(list.filter(x => object(x) && x.type === 'function_call_output').map(x => x.call_id));
+          for (let i = list.length - 1; i >= 0; i--) {
+            const item = list[i];
+            if (object(item) && item.type === 'function_call' && !outputs.has(item.call_id)) {
+              list.splice(i + 1, 0, { type: 'function_call_output', call_id: item.call_id,
+                output: '(The tool call was interrupted before producing output.)' });
+            }
+          }
+        }
+        if (stage === 2 && isInput) {
+          const asText = value => typeof value === 'string' ? value : JSON.stringify(value ?? '');
+          for (let i = 0; i < list.length; i++) {
+            const item = list[i];
+            if (!object(item)) continue;
+            const type = String(item.type ?? '');
+            if (!/_call(_output)?$/.test(type) && type !== 'reasoning') continue;
+            const text = type === 'reasoning' ? '[session log] (prior reasoning omitted)'
+              : /_call_output$/.test(type) ? `[session log] That tool call returned:\n${asText(item.output)}`
+              : `[session log] Earlier, the assistant invoked the tool \`${item.name ?? type}\` with input:\n${asText(item.arguments ?? item.input ?? item.action)}`;
+            list[i] = { type: 'message', role: 'user', content: [{ type: 'input_text', text }] };
+          }
+        }
+        const tail = list.at(-1);
+        if (!(object(tail) && tail.role === 'user' && /Continue from exactly/.test(JSON.stringify(tail.content ?? '')))) {
+          list.push(isInput
+            ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue from exactly where you left off.' }] }
+            : { role: 'user', content: 'Continue from exactly where you left off.' });
+        }
+        const { _relayRepair, ...clean } = geminiPayload;
         body = Buffer.from(JSON.stringify(clean));
         headers['content-length'] = String(body.length);
         return true;
@@ -560,7 +591,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
           guarded = await guardStream(response);
           const retryable = guarded.verdict === 'retry' || guarded.verdict === 'retry_model_turn';
           if (!retryable || attempt >= 4) break;
-          if (guarded.verdict === 'retry_model_turn' && !appendContinueTurn()) break;
+          if (guarded.verdict === 'retry_model_turn' && !repairModelTurn()) break;
           response.destroy();
           log({ event: 'upstream_misroute_retry', status, attempt: attempt + 1,
             reason: guarded.verdict === 'retry_model_turn' ? 'model_turn_fallback_sse' : 'sse_early_error' });
@@ -577,8 +608,9 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         catch { text = errorBody.toString('utf8'); }
         const misroute = MISROUTE.test(text);
         const transient5xx = (response.statusCode ?? 0) >= 500;
-        if (/Requests ending with a model turn/i.test(text) && appendContinueTurn()) {
-          log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1, reason: 'model_turn_fallback' });
+        if (/Requests ending with a model turn/i.test(text) && repairModelTurn()) {
+          log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1,
+            reason: 'model_turn_fallback', stage: geminiPayload._relayRepair });
           continue;
         }
         if (!misroute && !transient5xx && !EXHAUSTED.test(text)) break;

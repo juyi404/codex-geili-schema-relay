@@ -224,6 +224,45 @@ test('pins max_output_tokens for gemini requests that lack one', () => {
   assert.equal(gpt.max_output_tokens, undefined);
 });
 
+test('escalates model-turn repair: synthesized outputs, then all-text history', async () => {
+  const bodies = [];
+  const upstream = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    bodies.push(Buffer.concat(chunks).toString());
+    if (bodies.length <= 2) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end('{"error":{"message":"Requests ending with a model turn are not supported."}}');
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    }
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const relay = createRelay({ upstream: `http://127.0.0.1:${upstream.address().port}/v1` });
+  await new Promise(resolve => relay.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${relay.server.address().port}`;
+  try {
+    const response = await fetch(`${base}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer test-key' },
+      body: JSON.stringify({ model: 'gemini-4-argon',
+        tools: [{ type: 'function', name: 'poll', parameters: { type: 'object', properties: {} } }],
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] },
+          { type: 'function_call', call_id: 'c1', name: 'poll', arguments: '{}' },
+        ] }) });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), '{"ok":true}');
+    assert.equal(bodies.length, 3);
+    assert.match(bodies[1], /interrupted before producing output/);
+    assert.match(bodies[1], /Continue from exactly/);
+    assert.match(bodies[2], /session log[\s\S]*poll/);
+    assert.doesNotMatch(bodies[2], /"type":"function_call"/);
+    assert.doesNotMatch(bodies[2], /_relayRepair/);
+  } finally {
+    await relay.close(); upstream.closeAllConnections();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test('appends the continue turn when the model-turn error arrives in-stream', async () => {
   const bodies = [];
   const upstream = createServer(async (req, res) => {
