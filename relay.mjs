@@ -371,7 +371,7 @@ function headersWithoutHop(headers) {
   return result;
 }
 
-const STREAM_RETRYABLE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"|All available accounts exhausted|server_is_overloaded|service_unavailable/i;
+const STREAM_RETRYABLE = /Unknown name \\?"(?:anthropic_version|messages|system|max_tokens)\\?"|All available accounts exhausted|server_is_overloaded|service_unavailable|Upstream response did not complete/i;
 const STREAM_CONTENT = /"type"\s*:\s*"response\.(?:output_item|content_part|output_text|reasoning|function_call|completed|incomplete)|"object"\s*:\s*"chat\.completion/;
 // Gateways often return 200, open the SSE stream, and only then emit an error
 // event for a failed upstream call. Nothing has reached the client yet at that
@@ -607,7 +607,7 @@ export function createRelay({ upstream = UPSTREAM, log = () => {}, digest = 'tes
         try { text = response.headers['content-encoding'] === 'gzip' ? gunzipSync(errorBody).toString('utf8') : errorBody.toString('utf8'); }
         catch { text = errorBody.toString('utf8'); }
         const misroute = MISROUTE.test(text);
-        const transient5xx = (response.statusCode ?? 0) >= 500;
+        const transient5xx = (response.statusCode ?? 0) >= 500 || /Upstream response did not complete/i.test(text);
         if (/Requests ending with a model turn/i.test(text) && repairModelTurn()) {
           log({ event: 'upstream_misroute_retry', status: response.statusCode, attempt: attempt + 1,
             reason: 'model_turn_fallback', stage: geminiPayload._relayRepair });
